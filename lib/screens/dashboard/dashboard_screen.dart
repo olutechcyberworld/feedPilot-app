@@ -578,8 +578,8 @@ class _LastDispenseCard extends StatelessWidget {
           const SizedBox(height: 10),
 
           Text(
-            hasData
-                ? status!.lastDispense.timestamp
+            (hasData && status!.lastDispense.timestamp != null)
+                ? status!.lastDispense.timestamp!
                     .toLocal()
                     .toString()
                     .substring(0, 16)

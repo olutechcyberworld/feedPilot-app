@@ -30,6 +30,14 @@ final mqttServiceProvider = Provider<MqttService?>((ref) {
 
   final service = MqttService(topics: topics, deviceId: deviceId);
 
+  // Start the connection as soon as the service exists. Without this,
+  // the service sits fully wired (topics, streams, providers all watching)
+  // but never actually opens a socket to the broker. connect() is safe to
+  // call here — it early-returns if already connecting/connected, and this
+  // provider only rebuilds when deviceId changes (re-pair), which is
+  // exactly when a fresh connection is wanted.
+  service.connect();
+
   ref.onDispose(() => service.dispose());
 
   return service;

@@ -9,7 +9,7 @@ import '../models/hopper_weight.dart';
 
 class LocalStorageService {
   static const String _dbName = 'feedpilot.db';
-  static const int _dbVersion = 1;
+  static const int _dbVersion = 2;
 
   // Table names
   static const String _tableFeedRecords = 'feed_records';
@@ -28,11 +28,19 @@ class LocalStorageService {
       path,
       version: _dbVersion,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
   }
 
   Future<void> _onCreate(Database db, int version) async {
-    // Feed cycle records — one row per completed dispense event
+    // Feed cycle records — one row per completed dispense event.
+    // UNIQUE(device_id, timestamp) is the dedup mechanism: feed/status
+    // republishes on the same cadence as all other telemetry, but
+    // last_dispense only changes when a real dispense completes. Rather
+    // than tracking "have I already seen this dispense" in application
+    // logic, repeated inserts for the same (device_id, timestamp) are
+    // silently absorbed by the database via ConflictAlgorithm.ignore in
+    // insertFeedRecord below.
     await db.execute('''
       CREATE TABLE $_tableFeedRecords (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +50,8 @@ class LocalStorageService {
         actual_g         INTEGER NOT NULL,
         fault            INTEGER NOT NULL DEFAULT 0,
         trough_state     TEXT    NOT NULL,
-        hopper_state     TEXT    NOT NULL
+        hopper_state     TEXT    NOT NULL,
+        UNIQUE(device_id, timestamp)
       )
     ''');
 
@@ -70,6 +79,40 @@ class LocalStorageService {
     ''');
   }
 
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      // v1 → v2: add UNIQUE(device_id, timestamp) to feed_records.
+      //
+      // This is a destructive migration — it drops and recreates the
+      // table rather than copying existing rows forward. That's safe
+      // specifically at this point in the project: insertFeedRecord had
+      // zero callers until this change (confirmed by code search), so no
+      // build in the field has ever actually written a row to this table.
+      // There is nothing to preserve.
+      //
+      // If this service is ever upgraded again from a build that has
+      // accumulated real feed history, this should be replaced with a
+      // proper migration: create the new table under a temp name, copy
+      // rows across with INSERT OR IGNORE (letting the new UNIQUE
+      // constraint deduplicate on the way in), drop the old table, then
+      // rename. Do not reuse this destructive path once real data exists.
+      await db.execute('DROP TABLE IF EXISTS $_tableFeedRecords');
+      await db.execute('''
+        CREATE TABLE $_tableFeedRecords (
+          id               INTEGER PRIMARY KEY AUTOINCREMENT,
+          device_id        TEXT    NOT NULL,
+          timestamp        TEXT    NOT NULL,
+          target_g         INTEGER NOT NULL,
+          actual_g         INTEGER NOT NULL,
+          fault            INTEGER NOT NULL DEFAULT 0,
+          trough_state     TEXT    NOT NULL,
+          hopper_state     TEXT    NOT NULL,
+          UNIQUE(device_id, timestamp)
+        )
+      ''');
+    }
+  }
+
   // ── Internal guard ─────────────────────────────────────────────────────────
 
   Database get _database {
@@ -81,17 +124,30 @@ class LocalStorageService {
   // ── Feed Records ───────────────────────────────────────────────────────────
 
   /// Persists a completed dispense event derived from a feed/status payload.
+  ///
+  /// No-ops if [dispense.timestamp] is null — a null timestamp means the
+  /// device has not completed a dispense yet (fresh boot / idle state
+  /// before the first feed cycle), which is not a completed event and has
+  /// nothing meaningful to write.
+  ///
+  /// Safe to call on every feed/status message even though the message
+  /// republishes on a ~2s cadence: the UNIQUE(device_id, timestamp)
+  /// constraint plus ConflictAlgorithm.ignore means repeated calls for the
+  /// same completed dispense are silently no-ops at the database level.
   Future<void> insertFeedRecord({
     required String deviceId,
     required LastDispense dispense,
     required TroughState troughState,
     required String hopperState,
   }) async {
+    final timestamp = dispense.timestamp;
+    if (timestamp == null) return;
+
     await _database.insert(
       _tableFeedRecords,
       {
         'device_id': deviceId,
-        'timestamp': dispense.timestamp.toIso8601String(),
+        'timestamp': timestamp.toIso8601String(),
         'target_g': dispense.targetG,
         'actual_g': dispense.actualG,
         'fault': dispense.fault ? 1 : 0,
@@ -156,7 +212,8 @@ class LocalStorageService {
   // ── Telemetry Snapshots ────────────────────────────────────────────────────
 
   /// Persists a hopper weight snapshot for trend display.
-  /// Called every time a hopper/weight MQTT message is received.
+  /// Called by HistorySyncService, throttled to one call per minute —
+  /// see HistorySyncService for why unthrottled persistence isn't used.
   Future<void> insertTelemetry({
     required String deviceId,
     required HopperWeight reading,
@@ -192,7 +249,7 @@ class LocalStorageService {
   // ── Retention Enforcement ──────────────────────────────────────────────────
 
   /// Deletes telemetry rows older than 180 days (6-month retention window).
-  /// Called once at app startup from main.dart after init() completes.
+  /// Called once at HistorySyncService startup.
   Future<void> enforceRetentionPolicy({required String deviceId}) async {
     final cutoff =
         DateTime.now().subtract(const Duration(days: 180)).toIso8601String();

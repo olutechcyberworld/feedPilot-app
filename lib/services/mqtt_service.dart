@@ -90,9 +90,9 @@ class MqttService {
     final lwtPayload = jsonEncode({
       'uptime_s': 0,
       'connectivity_tier': 0,
-      'firmware_version': '—',
+      'firmware_version': 'N/A',
       'status': 'APP_OFFLINE',
-      'timestamp': '—',
+      'timestamp': 'N/A',
     });
 
     // Note: mqtt_client defaults to clean session false when startClean()

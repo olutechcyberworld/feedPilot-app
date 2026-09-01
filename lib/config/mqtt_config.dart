@@ -50,15 +50,12 @@ class MqttConfig {
   static const int qosCommands = 2; // App → Node
 
   // ── Startup validation ────────────────────────────────────────────────────
-  // Called once in main.dart before the app builds. Fails fast and loud
-  // rather than connecting with empty-string credentials, which would
-  // otherwise produce a silent, confusing broker authentication failure.
-  static void assertConfigured() {
-    assert(
+  // Runtime check — NOT gated behind assert(), because assert() is stripped
+  // in release builds. A missing .env at release-build time must fail the
+  // same visible way in every build mode, or it fails silently exactly when
+  // there's no debugger attached to catch it (e.g. a demo/exam build).
+  static bool get isConfigured =>
       brokerHost.isNotEmpty &&
-          brokerUsername.isNotEmpty &&
-          brokerPassword.isNotEmpty,
-      'MQTT config missing. Run with: flutter run --dart-define-from-file=.env',
-    );
-  }
+      brokerUsername.isNotEmpty &&
+      brokerPassword.isNotEmpty;
 }

@@ -13,6 +13,7 @@ import '../models/feed_status.dart';
 import '../models/feed_alert.dart';
 import '../models/system_health.dart';
 import '../models/local_ip.dart';
+import '../models/feed_ack.dart';
 
 /// Connection state of the MqttService itself — distinct from the
 /// mqtt_client package's own MqttConnectionState enum.
@@ -48,6 +49,7 @@ class MqttService {
   final _localIpController = StreamController<LocalIp>.broadcast();
   final _connectionStateController =
       StreamController<MqttServiceState>.broadcast();
+  final _feedAckController = StreamController<FeedAck>.broadcast();
 
   // ── Public streams ─────────────────────────────────────────────────────────
 
@@ -61,6 +63,7 @@ class MqttService {
       _connectionStateController.stream;
 
   MqttServiceState get connectionState => _connectionState;
+  Stream<FeedAck> get feedAckStream => _feedAckController.stream;
 
   // ── Connection ─────────────────────────────────────────────────────────────
 
@@ -141,6 +144,7 @@ class MqttService {
     _client!.subscribe(topics.feedAlerts, qos1);
     _client!.subscribe(topics.systemHealth, qos1);
     _client!.subscribe(topics.systemLocalIp, qos1);
+    _client!.subscribe(topics.feedAck, qos1);
   }
 
   // ── Incoming message dispatch ──────────────────────────────────────────────
@@ -180,6 +184,8 @@ class MqttService {
       _systemHealthController.add(SystemHealth.fromJson(json));
     } else if (topic == topics.systemLocalIp) {
       _localIpController.add(LocalIp.fromJson(json));
+    } else if (topic == topics.feedAck) {
+      _feedAckController.add(FeedAck.fromJson(json));
     }
   }
 
@@ -304,6 +310,7 @@ class MqttService {
     await _systemHealthController.close();
     await _localIpController.close();
     await _connectionStateController.close();
+    await _feedAckController.close();
     _client?.disconnect();
   }
 }

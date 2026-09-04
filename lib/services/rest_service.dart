@@ -165,8 +165,12 @@ class RestService {
   }
 
   /// Issues a restock confirmation via POST /control.
-  Future<bool> postRestock() async {
-    return _postControl({'command': 'RESTOCK'});
+  /// Issues a restock confirmation via POST /control.
+  Future<bool> postRestock({required double amountKg}) async {
+    return _postControl({
+      'command': 'RESTOCK',
+      'amount_kg': amountKg,
+    });
   }
 
   Future<bool> _postControl(Map<String, dynamic> body) async {
@@ -191,6 +195,22 @@ class RestService {
       _errorController.add('RestService: POST /control error: $e');
       return false;
     }
+  }
+
+  /// Issues a schedule/config update via POST /control. Tier 2 REST
+  /// equivalent of the MQTT feed/config topic, so schedule changes
+  /// don't strictly require full cloud connectivity.
+  Future<bool> postConfig({
+    required List<Map<String, dynamic>> schedules,
+    required double hopperLowThresholdKg,
+    required int portionGrams,
+  }) async {
+    return _postControl({
+      'command': 'CONFIG',
+      'schedules': schedules,
+      'hopper_low_threshold_kg': hopperLowThresholdKg,
+      'portion_g': portionGrams,
+    });
   }
 
   // ── Internal helpers ───────────────────────────────────────────────────────

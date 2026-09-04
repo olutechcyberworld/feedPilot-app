@@ -73,6 +73,8 @@ class APFSTopics {
   /// Payload: { "command": "RESTOCK", "amount_kg": double }
   String get hopperRestock => 'farm/$deviceId/hopper/restock';
 
+  String get feedAck => 'farm/$deviceId/feed/ack';
+
   // ── Diagnostic ────────────────────────────────────────────────────────────
 
   /// Wildcard subscription covering all nine topics for this device.

@@ -10,6 +10,7 @@ import '../models/feed_alert.dart';
 import '../models/system_health.dart';
 import '../models/local_ip.dart';
 import 'device_provider.dart';
+import '../models/feed_ack.dart';
 
 /// Provides the APFSTopics instance scoped to the current deviceId.
 /// Rebuilds automatically if deviceId changes (re-pair flow).
@@ -89,4 +90,10 @@ final mqttConnectionStateStreamProvider =
   final service = ref.watch(mqttServiceProvider);
   if (service == null) return const Stream.empty();
   return service.connectionStateStream;
+});
+
+final feedAckStreamProvider = StreamProvider<FeedAck>((ref) {
+  final service = ref.watch(mqttServiceProvider);
+  if (service == null) return const Stream.empty();
+  return service.feedAckStream;
 });

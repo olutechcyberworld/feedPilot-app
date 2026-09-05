@@ -4,10 +4,34 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/system_health.dart';
+import '../../models/feed_alert.dart';
+import '../../models/feed_status.dart';
 import '../../providers/mqtt_provider.dart';
 import '../../providers/connectivity_provider.dart';
 import '../../providers/device_provider.dart';
 import '../../services/schedule_config_storage.dart';
+
+/// Result of waiting for a triggered dispense cycle to actually
+/// conclude, as opposed to just being acknowledged as received. See
+/// _ControlScreenState._awaitDispenseOutcome for why this exists.
+enum _DispenseOutcomeKind { success, failure, unknown }
+
+class _DispenseOutcome {
+  final _DispenseOutcomeKind kind;
+  final int? actualG;
+  final String? failureMessage;
+
+  const _DispenseOutcome.success(this.actualG)
+      : kind = _DispenseOutcomeKind.success,
+        failureMessage = null;
+  const _DispenseOutcome.failure(this.failureMessage)
+      : kind = _DispenseOutcomeKind.failure,
+        actualG = null;
+  const _DispenseOutcome.unknown()
+      : kind = _DispenseOutcomeKind.unknown,
+        actualG = null,
+        failureMessage = null;
+}
 
 class _ScheduleDraft {
   TimeOfDay time;
@@ -94,9 +118,12 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
   }
 
   /// Publishes over MQTT, then waits for a matching feed/ack event (up
-  /// to 5s) before reporting success. Only meaningful on the MQTT
-  /// path — REST already has synchronous ACCEPTED/REJECTED feedback
-  /// via its HTTP response, so this is never used for that branch.
+  /// to 5s). Resolves once the device confirms RECEIPT only — this
+  /// does NOT mean the command succeeded, just that it arrived. Callers
+  /// that need the actual outcome of a FEED trigger must follow this
+  /// with _awaitDispenseOutcome; RESTOCK/CONFIG have no equivalent
+  /// async completion beyond "applied", so ack alone is sufficient for
+  /// those two.
   Future<bool> _publishAndAwaitAck({
     required String expectedCommand,
     required VoidCallback publish,
@@ -121,27 +148,130 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
     return acked;
   }
 
+  /// Alert types that represent the OUTCOME of a dispense attempt, as
+  /// opposed to independent, threshold-driven alerts (HOPPER_LOW) or
+  /// alerts belonging to a different command (CALIBRATION_WARNING,
+  /// fired by RESTOCK). Only these are eligible to resolve a pending
+  /// feed trigger — anything else arriving during the wait window is
+  /// unrelated background noise, not this command's result.
+  static const _dispenseOutcomeAlertTypes = {
+    AlertType.insufficientStock,
+    AlertType.dispenseJam,
+    AlertType.troughFullSkip,
+    AlertType.gateSealFail,
+    AlertType.hopperSensorFault,
+  };
+
+  /// Waits for the first real signal that a just-triggered dispense
+  /// cycle has actually concluded — success or failure — instead of
+  /// treating feed/ack's "RECEIVED" as the final word.
+  ///
+  /// The ack only proves the device got the request; it fires before
+  /// the device has attempted anything. Without this, a trigger sent
+  /// to an empty hopper acked normally and then silently dispensed
+  /// nothing, with no feedback distinguishing that from success.
+  ///
+  /// Correlates by TIMESTAMP against [sentAt], not by a request ID —
+  /// the MQTT schema doesn't carry one (flagged in the reference card
+  /// addendum; a real fix needs a firmware schema change). This is
+  /// deliberately just enough to reject a stale alert or status
+  /// replayed from the firmware's NVS ring buffer on reconnect, which
+  /// would otherwise resolve THIS trigger using a leftover record
+  /// from a previous one.
+  ///
+  /// Timeout covers the firmware's worst realistic case:
+  /// JAM_NO_DROP_TIMEOUT_MS (5s) or DISPENSE_VERIFY_SETTLE_MS +
+  /// GATE_SEAL_FAIL_TIMEOUT_MS (2s + 3s), plus feed/status's 2s
+  /// republish cadence as margin. If nothing arrives in that window,
+  /// the device genuinely hasn't confirmed anything — that's the one
+  /// case "no response" should actually describe.
+  Future<_DispenseOutcome> _awaitDispenseOutcome(DateTime sentAt) async {
+    final mqttService = ref.read(mqttServiceProvider);
+    if (mqttService == null) return const _DispenseOutcome.unknown();
+
+    final completer = Completer<_DispenseOutcome>();
+
+    final alertSub = mqttService.feedAlertStream.listen((alert) {
+      if (completer.isCompleted) return;
+      if (!_dispenseOutcomeAlertTypes.contains(alert.type)) return;
+      if (alert.timestamp.isBefore(sentAt)) return; // stale/replayed
+      completer.complete(_DispenseOutcome.failure(alert.displayLabel));
+    });
+
+    final statusSub = mqttService.feedStatusStream.listen((status) {
+      if (completer.isCompleted) return;
+      if (status.cycleState != CycleState.idle) return;
+      final ts = status.lastDispense.timestamp;
+      if (ts == null || ts.isBefore(sentAt)) return; // no fresh dispense yet
+      completer.complete(_DispenseOutcome.success(status.lastDispense.actualG));
+    });
+
+    final outcome = await completer.future.timeout(
+      const Duration(seconds: 12),
+      onTimeout: () => const _DispenseOutcome.unknown(),
+    );
+
+    await alertSub.cancel();
+    await statusSub.cancel();
+    return outcome;
+  }
+
   Future<void> _triggerFeed(ConnectivityTier tier) async {
     setState(() => _feedTriggerBusy = true);
     final mqttService = ref.read(mqttServiceProvider);
     final restService = ref.read(restServiceProvider);
     final portion = int.tryParse(_defaultPortionController.text) ?? 150;
 
-    bool ok;
     if (tier == ConnectivityTier.fullCloud) {
-      ok = await _publishAndAwaitAck(
+      final sentAt = DateTime.now();
+      final acked = await _publishAndAwaitAck(
         expectedCommand: 'FEED',
         publish: () => mqttService?.publishFeedTrigger(portionGrams: portion),
       );
-    } else {
-      ok = await restService.postFeedTrigger(portionGrams: portion);
-    }
 
-    if (!mounted) return;
-    setState(() => _feedTriggerBusy = false);
-    _showSnack(ok
-        ? 'Feed command received by device.'
-        : 'No response from device — check connection.');
+      if (!acked) {
+        // Genuinely true now: the device never even confirmed receipt.
+        if (!mounted) return;
+        setState(() => _feedTriggerBusy = false);
+        _showSnack('No response from device — check connection.');
+        return;
+      }
+
+      // Ack only proves the command arrived — it fires before the
+      // device has attempted anything. Stay busy and wait for the
+      // actual result instead of declaring success here.
+      _showSnack('Device received command — dispensing...');
+      final outcome = await _awaitDispenseOutcome(sentAt);
+
+      if (!mounted) return;
+      setState(() => _feedTriggerBusy = false);
+
+      switch (outcome.kind) {
+        case _DispenseOutcomeKind.success:
+          _showSnack('Dispensed ${outcome.actualG}g.');
+          break;
+        case _DispenseOutcomeKind.failure:
+          _showSnack('Feed not dispensed: ${outcome.failureMessage}');
+          break;
+        case _DispenseOutcomeKind.unknown:
+          _showSnack(
+              'Command sent, but device did not confirm the result — check the dashboard.');
+          break;
+      }
+    } else {
+      // Tier 2 (REST) has the same underlying gap: POST /control's
+      // ACCEPTED response only means the device queued the command,
+      // not that anything was dispensed, and RestService does not yet
+      // surface cycle_state/feed/alerts equivalents from /sensors to
+      // resolve it the way the MQTT path above does. Said honestly
+      // here rather than reusing the old, now-inaccurate wording.
+      final ok = await restService.postFeedTrigger(portionGrams: portion);
+      if (!mounted) return;
+      setState(() => _feedTriggerBusy = false);
+      _showSnack(ok
+          ? 'Feed command accepted by device (outcome not confirmed on this connection tier).'
+          : 'No response from device — check connection.');
+    }
   }
 
   Future<void> _confirmRestock(ConnectivityTier tier) async {

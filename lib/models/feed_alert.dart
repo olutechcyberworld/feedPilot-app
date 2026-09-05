@@ -6,6 +6,8 @@ enum AlertType {
   dispenseJam,
   gateSealFail,
   calibrationWarning,
+  hopperSensorFault,
+  insufficientStock,
   unknown,
 }
 
@@ -45,6 +47,10 @@ class FeedAlert {
         return AlertType.gateSealFail;
       case 'CALIBRATION_WARNING':
         return AlertType.calibrationWarning;
+      case 'HOPPER_SENSOR_FAULT':
+        return AlertType.hopperSensorFault;
+      case 'INSUFFICIENT_STOCK':
+        return AlertType.insufficientStock;
       default:
         return AlertType.unknown;
     }
@@ -63,6 +69,10 @@ class FeedAlert {
         return 'Gate Seal Failure';
       case AlertType.calibrationWarning:
         return 'Calibration Warning';
+      case AlertType.hopperSensorFault:
+        return 'Hopper Sensor Fault';
+      case AlertType.insufficientStock:
+        return 'Insufficient Stock';
       case AlertType.unknown:
         return 'Unknown Alert';
     }
